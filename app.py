@@ -5,15 +5,18 @@ from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 
 # ==========================================
-# 1. 頁面設定與連接資料庫
+# 0. 設定與常數 (關鍵修正：直接在這裡指定網址)
 # ==========================================
+# 這是你的 Google Sheet 網址
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1b55B_GkbT4vDwG2T5-wDQXs5RMlN8tkrBEVXvpzmrt4/edit?usp=sharing"
+
 st.set_page_config(page_title="天然氣管家 (雲端版)", layout="wide")
 
 # 建立 Google Sheets 連線
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # ==========================================
-# 2. 登入系統邏輯
+# 1. 登入系統邏輯
 # ==========================================
 def login_system():
     """處理登入介面與驗證"""
@@ -25,12 +28,11 @@ def login_system():
     if not st.session_state.logged_in:
         st.header("🔐 用戶登入")
         
-        # 讀取使用者清單 (users 工作表)
-        # ttl=0 代表不快取，每次都抓最新資料
         try:
-            users_df = conn.read(worksheet="users", ttl=0)
+            # 【修正】這裡強制指定 spreadsheet 網址
+            users_df = conn.read(spreadsheet=SHEET_URL, worksheet="users", ttl=0)
         except Exception as e:
-            st.error(f"詳細錯誤訊息: {e}")
+            st.error(f"無法讀取使用者資料庫: {e}")
             return
 
         with st.form("login_form"):
@@ -40,10 +42,10 @@ def login_system():
 
             if submit:
                 # 尋找帳號
-                user_match = users_df[users_df['Username'] == username_input]
+                # 為了避免大小寫或空格問題，將欄位轉為字串處理
+                user_match = users_df[users_df['Username'].astype(str) == str(username_input)]
                 
                 if not user_match.empty:
-                    # 比對密碼 (這裡做簡易比對，真實產品建議加密)
                     stored_password = str(user_match.iloc[0]['Password'])
                     if str(password_input) == stored_password:
                         st.session_state.logged_in = True
@@ -55,22 +57,20 @@ def login_system():
                         st.error("密碼錯誤")
                 else:
                     st.error("找不到此帳號")
-        return False # 未登入
+        return False
     else:
-        return True # 已登入
+        return True
 
 # ==========================================
-# 3. 數據處理邏輯 (針對單一用戶)
+# 2. 數據處理邏輯
 # ==========================================
 def process_user_data(df, freq_hours):
-    """處理數據並計算區間用量"""
     if df.empty: return pd.DataFrame()
     
     df = df.sort_values('Timestamp')
     df = df.drop_duplicates(subset=['Timestamp'], keep='last')
     df = df.set_index('Timestamp')
     
-    # 時間重採樣與插值
     start_time = df.index[0]
     end_time = df.index[-1]
     
@@ -88,7 +88,6 @@ def process_user_data(df, freq_hours):
     df_result = df_result.reset_index()
     df_result.columns = ['標準時間', '推估度數', '區間用量']
     
-    # 產生標籤
     labels = []
     for dt in df_result['標準時間']:
         dt_start = dt - pd.Timedelta(hours=freq_hours)
@@ -102,7 +101,6 @@ def process_user_data(df, freq_hours):
     return df_result
 
 def plot_chart(df, avg_val, title):
-    """繪製圖表"""
     plot_df = df.iloc[1:].copy()
     if plot_df.empty: return None
 
@@ -120,13 +118,12 @@ def plot_chart(df, avg_val, title):
     return fig
 
 # ==========================================
-# 4. 主程式 (Main App)
+# 3. 主程式
 # ==========================================
 def main_app():
     user = st.session_state.username
     real_name = st.session_state.real_name
     
-    # 側邊欄：登出與輸入
     with st.sidebar:
         st.write(f"👋 哈囉，**{real_name}**")
         if st.button("登出", type="secondary"):
@@ -144,14 +141,12 @@ def main_app():
             submit_data = st.form_submit_button("提交紀錄", type="primary")
             
             if submit_data:
-                # 1. 讀取目前所有數據
                 try:
-                    all_data = conn.read(worksheet="logs", ttl=0)
+                    # 【修正】強制指定網址
+                    all_data = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
                 except:
-                    # 如果是空的或第一筆，建立 DataFrame
                     all_data = pd.DataFrame(columns=['Timestamp', 'Username', 'Reading', 'Note'])
 
-                # 2. 準備新資料
                 input_dt = datetime.combine(date_in, time_in)
                 new_row = pd.DataFrame({
                     'Timestamp': [input_dt],
@@ -160,24 +155,20 @@ def main_app():
                     'Note': ["App輸入"]
                 })
                 
-                # 3. 合併並寫回 Google Sheets
-                # 為了避免格式問題，確保 Timestamp 是字串或標準格式
                 updated_df = pd.concat([all_data, new_row], ignore_index=True)
-                conn.update(worksheet="logs", data=updated_df)
+                # 【修正】強制指定網址
+                conn.update(spreadsheet=SHEET_URL, worksheet="logs", data=updated_df)
                 
                 st.success("✅ 紀錄已儲存！")
                 st.rerun()
 
-    # 主畫面邏輯
     st.title(f"🔥 {real_name} 的天然氣儀表板")
     
-    # 1. 讀取並篩選該用戶數據
     try:
-        df_all = conn.read(worksheet="logs", ttl=0)
-        # 轉換時間格式，避免出錯
+        # 【修正】強制指定網址
+        df_all = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
         df_all['Timestamp'] = pd.to_datetime(df_all['Timestamp'])
         
-        # 【關鍵步驟】只留下目前登入者的資料
         df_user = df_all[df_all['Username'] == user].copy()
         df_user = df_user.sort_values('Timestamp')
         
@@ -187,7 +178,6 @@ def main_app():
     if df_user.empty:
         st.info("目前還沒有您的紀錄，請從左側輸入第一筆數據。")
     else:
-        # 顯示基本統計
         latest = df_user['Reading'].iloc[-1]
         total_used = df_user['Reading'].iloc[-1] - df_user['Reading'].iloc[0]
         days = (df_user['Timestamp'].iloc[-1] - df_user['Timestamp'].iloc[0]).days
@@ -199,7 +189,6 @@ def main_app():
         
         st.markdown("---")
         
-        # 圖表分析
         tab1, tab2 = st.tabs(["12小時分析", "原始數據"])
         
         with tab1:
@@ -214,10 +203,6 @@ def main_app():
         with tab2:
             st.dataframe(df_user[['Timestamp', 'Reading', 'Note']], use_container_width=True)
 
-# ==========================================
-# 程式進入點
-# ==========================================
 if __name__ == "__main__":
     if login_system():
         main_app()
-
