@@ -29,8 +29,8 @@ def login_system():
         # ttl=0 代表不快取，每次都抓最新資料
         try:
             users_df = conn.read(worksheet="users", ttl=0)
-        except Exception:
-            st.error("無法讀取使用者資料庫，請確認 Google Sheet 設定是否正確 (是否有名為 'users' 的工作表)。")
+        except Exception as e:
+            st.error(f"詳細錯誤訊息: {e}")
             return
 
         with st.form("login_form"):
@@ -220,3 +220,4 @@ def main_app():
 if __name__ == "__main__":
     if login_system():
         main_app()
+
