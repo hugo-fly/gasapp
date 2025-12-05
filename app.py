@@ -96,8 +96,3 @@ def main_app():
 if __name__ == "__main__":
     if login_system():
         main_app()
-
-if __name__ == "__main__":
-    if login_system():
-        main_app()
-
