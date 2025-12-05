@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from streamlit_gsheets import GSheetsConnection
-import plotly.graph_objects as go # 確保有引入這個繪圖套件
+import plotly.graph_objects as go
 
 # ==========================================
 # 0. 設定區
@@ -34,13 +34,14 @@ def login_system():
             user_input = st.text_input("帳號")
             pwd_input = st.text_input("密碼", type="password")
             if st.form_submit_button("登入"):
-                # 清理輸入
                 clean_user = str(user_input).strip()
                 clean_pwd = str(pwd_input).strip()
                 
+                # 尋找帳號
                 match = users_df[users_df['Username'].astype(str).str.strip() == clean_user]
 
                 if not match.empty:
+                    # 處理密碼 (去除 .0)
                     db_pass = str(match.iloc[0]['Password']).strip().replace(".0", "")
                     if db_pass == clean_pwd:
                         st.session_state.logged_in = True
@@ -56,7 +57,7 @@ def login_system():
     return True
 
 # ==========================================
-# 2. 主程式 (含圖表)
+# 2. 主程式 (含圖表與日期修復)
 # ==========================================
 def main_app():
     user = st.session_state.username
@@ -79,7 +80,6 @@ def main_app():
             except:
                 logs_df = pd.DataFrame(columns=['Timestamp', 'Username', 'Reading', 'Note'])
             
-            # 組合日期時間字串
             ts_str = datetime.combine(date_in, time_in).strftime("%Y-%m-%d %H:%M:%S")
             
             new_row = pd.DataFrame({
@@ -105,41 +105,54 @@ def main_app():
         user_df = df[df['Username'].astype(str).str.strip() == str(user).strip()].copy()
         
         if not user_df.empty:
-            # 3. 資料處理：確保時間格式正確並排序
-            user_df['Timestamp'] = pd.to_datetime(user_df['Timestamp'])
+            # ========================================================
+            # 🔴 關鍵修復區：處理日期格式不一致的問題
+            # ========================================================
+            # format='mixed' 允許同時存在 "2025/11/29" 和 "2025-11-29 18:00"
+            # errors='coerce' 如果遇到無法解析的亂碼，會變成 NaT (空值) 而不是報錯
+            user_df['Timestamp'] = pd.to_datetime(user_df['Timestamp'], format='mixed', errors='coerce')
+            
+            # 刪除日期解析失敗的空行 (防止圖表報錯)
+            user_df = user_df.dropna(subset=['Timestamp'])
+            
+            # 排序
             user_df = user_df.sort_values(by='Timestamp')
+            # ========================================================
 
             # --- A. 顯示關鍵指標 (最新狀態) ---
-            last_record = user_df.iloc[-1]
-            col1, col2 = st.columns(2)
-            col1.metric("最新度數", f"{last_record['Reading']} 度")
-            col2.metric("上次抄表時間", last_record['Timestamp'].strftime("%Y-%m-%d"))
+            if not user_df.empty:
+                last_record = user_df.iloc[-1]
+                col1, col2 = st.columns(2)
+                col1.metric("最新度數", f"{last_record['Reading']} 度")
+                col2.metric("上次抄表時間", last_record['Timestamp'].strftime("%Y-%m-%d"))
 
-            st.markdown("---")
+                st.markdown("---")
 
-            # --- B. 繪製圖表 (Plotly) ---
-            st.subheader("📈 用量趨勢圖")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=user_df['Timestamp'], 
-                y=user_df['Reading'],
-                mode='lines+markers',
-                name='度數',
-                line=dict(color='firebrick', width=2)
-            ))
-            fig.update_layout(
-                xaxis_title="日期",
-                yaxis_title="度數",
-                hovermode="x unified"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                # --- B. 繪製圖表 (Plotly) ---
+                st.subheader("📈 用量趨勢圖")
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=user_df['Timestamp'], 
+                    y=user_df['Reading'],
+                    mode='lines+markers',
+                    name='度數',
+                    line=dict(color='#FF4B4B', width=3)
+                ))
+                fig.update_layout(
+                    xaxis_title="日期",
+                    yaxis_title="度數",
+                    hovermode="x unified",
+                    template="plotly_dark"
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
-            # --- C. 顯示詳細資料表 ---
-            with st.expander("查看詳細數據表格"):
-                # 為了美觀，將日期轉回字串顯示
-                display_df = user_df.sort_values(by='Timestamp', ascending=False)
-                display_df['Timestamp'] = display_df['Timestamp'].dt.strftime("%Y-%m-%d %H:%M:%S")
-                st.dataframe(display_df, use_container_width=True)
+                # --- C. 顯示詳細資料表 ---
+                with st.expander("查看詳細數據表格"):
+                    display_df = user_df.sort_values(by='Timestamp', ascending=False)
+                    display_df['Timestamp'] = display_df['Timestamp'].dt.strftime("%Y-%m-%d %H:%M:%S")
+                    st.dataframe(display_df, use_container_width=True)
+            else:
+                st.warning("所有日期的格式都無法辨識，請檢查 Google Sheet 內容。")
 
         else:
             st.info("尚無抄表紀錄，請從左側新增第一筆資料。")
