@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 import plotly.express as px
@@ -36,6 +36,7 @@ def login_system():
             pwd_in = st.text_input("密碼", type="password")
             if st.form_submit_button("登入"):
                 clean_user = str(user_in).strip()
+                # 轉字串比對，避免數字/文字格式不符
                 match = users_df[users_df['Username'].astype(str).str.strip() == clean_user]
                 
                 if not match.empty:
@@ -68,42 +69,43 @@ def calculate_interpolated_usage(df, interval_code):
     df = df.sort_values('Timestamp')
     df = df.set_index('Timestamp')
     
-    # 刪除重複時間點 (保留最後一次輸入)
+    # 刪除重複時間點
     df = df[~df.index.duplicated(keep='last')]
 
-    # 2. 建立連續時間軸 (以小時計，確保曲線平滑)
-    start = df.index[0].floor('h') # 無條件捨去到整點
-    end = df.index[-1].ceil('h')   # 無條件進位到整點
+    # 2. 建立連續時間軸 (以小時計)
+    start = df.index[0].floor('h')
+    end = df.index[-1].ceil('h')
     full_range = pd.date_range(start=start, end=end, freq='1h')
 
-    # 3. 合併並進行內插 (Interpolation)
-    # 這裡會算出每一個小時的「理論瓦斯表度數」
-    df_resampled = df.reindex(full_range.union(df.index)).sort_index()
+    # 3. 合併並進行內插
+    # 只取 'Reading' 欄位進行處理，避免其他文字欄位干擾
+    df_resampled = df[['Reading']].reindex(full_range.union(df.index)).sort_index()
     df_resampled['Reading'] = pd.to_numeric(df_resampled['Reading'], errors='coerce')
     df_resampled['Reading'] = df_resampled['Reading'].interpolate(method='time')
 
     # 4. 依照需求切分 (12H 或 24H)
-    # 取出整點數據
     df_final = df_resampled.resample(interval_code).first()
     
-    # 5. 計算區間用量 (差值)
+    # 5. 計算區間用量
     df_final['Usage'] = df_final['Reading'].diff()
     
     # 清理數據
     df_final = df_final.dropna(subset=['Usage'])
+    
+    # 6. 重置索引並改名
     df_final = df_final.reset_index()
     
-    # 6. 產生圖表用的標籤
+    # 【關鍵修復點】：強制只選取這 3 欄，解決 ValueError
+    df_final = df_final[['Timestamp', 'Reading', 'Usage']]
     df_final.columns = ['時間點', '推估讀數', '區間用量']
     
+    # 產生圖表標籤
     labels = []
     for t in df_final['時間點']:
         if interval_code == '12h':
             period = "上午" if t.hour < 12 else "下午"
-            # 顯示為該時段的開始，例如 00:00 代表上午時段
             labels.append(f"{t.strftime('%m/%d')} {period}")
         else:
-            # 24H 顯示日期
             labels.append(f"{t.strftime('%m/%d')}")
             
     df_final['標籤'] = labels
@@ -114,13 +116,13 @@ def calculate_interpolated_usage(df, interval_code):
 # ==========================================
 def draw_bar_chart(df, title, color_code):
     if df.empty:
-        st.info("數據不足，無法繪製圖表")
+        st.info("數據不足，無法繪製圖表 (至少需要兩筆不同時間的紀錄)")
         return
 
     avg_val = df['區間用量'].mean()
 
     fig = go.Figure()
-    # 柱狀圖：用量
+    # 柱狀圖
     fig.add_trace(go.Bar(
         x=df['標籤'], 
         y=df['區間用量'],
@@ -129,7 +131,7 @@ def draw_bar_chart(df, title, color_code):
         text=df['區間用量'].round(2),
         textposition='auto'
     ))
-    # 線圖：平均線
+    # 平均線
     fig.add_trace(go.Scatter(
         x=df['標籤'],
         y=[avg_val] * len(df),
@@ -161,7 +163,7 @@ def main_app():
     user = st.session_state.username
     real_name = st.session_state.real_name
     
-    # --- 側邊欄：輸入區 ---
+    # --- 側邊欄 ---
     with st.sidebar:
         st.write(f"👋 嗨，**{real_name}**")
         if st.button("登出", type="secondary"):
@@ -182,7 +184,6 @@ def main_app():
                 except:
                     logs = pd.DataFrame(columns=['Timestamp', 'Username', 'Reading', 'Note'])
                 
-                # 組合時間字串
                 ts_str = datetime.combine(date_in, time_in).strftime("%Y-%m-%d %H:%M:%S")
                 
                 new_data = pd.DataFrame({
@@ -202,13 +203,12 @@ def main_app():
 
     # 1. 讀取與清洗數據
     try:
+        # 【關鍵修復點】：加入 format='mixed' 解決日期格式錯誤
         df_all = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
-        
-        # 🔴 關鍵修復：解決日期格式錯誤 (format='mixed')
         df_all['Timestamp'] = pd.to_datetime(df_all['Timestamp'], format='mixed', errors='coerce')
         df_all = df_all.dropna(subset=['Timestamp'])
         
-        # 篩選用戶
+        # 篩選
         df = df_all[df_all['Username'].astype(str).str.strip() == str(user).strip()].copy()
         df['Reading'] = pd.to_numeric(df['Reading'], errors='coerce')
         df = df.sort_values('Timestamp')
@@ -220,12 +220,10 @@ def main_app():
     if df.empty:
         st.info("尚無數據，請從左側新增第一筆紀錄。")
     else:
-        # 2. 顯示關鍵指標
         latest_read = df.iloc[-1]['Reading']
         first_read = df.iloc[0]['Reading']
         total_days = (df.iloc[-1]['Timestamp'] - df.iloc[0]['Timestamp']).days
         
-        # 計算預估本月用量 (如果有足夠數據)
         if total_days > 0:
             avg_daily = (latest_read - first_read) / total_days
             est_monthly = avg_daily * 30
@@ -236,28 +234,25 @@ def main_app():
         c1.metric("目前讀數", f"{latest_read:.2f}")
         c2.metric("總累積用量", f"{(latest_read - first_read):.2f}")
         c3.metric("監測天數", f"{total_days} 天")
-        c4.metric("預估月用量", f"{est_monthly:.1f}", help="基於目前平均日用量推算")
+        c4.metric("預估月用量", f"{est_monthly:.1f}", help="推算值")
 
         st.divider()
 
-        # 3. 圖表分析區 (Tab 分頁)
+        # Tab 分頁
         tab1, tab2, tab3, tab4 = st.tabs(["📊 12H 分析", "📅 24H 分析", "📈 累積趨勢", "📋 原始數據"])
 
         with tab1:
-            st.caption("說明：透過內插法將用量分割為「上午 (00:00-12:00)」與「下午 (12:00-24:00)」兩個時段。")
             df_12h = calculate_interpolated_usage(df, '12h')
-            draw_bar_chart(df_12h, "每12小時用量 (早/晚)", "#636EFA") # 藍色系
+            draw_bar_chart(df_12h, "每12小時用量 (早/晚)", "#636EFA")
 
         with tab2:
-            st.caption("說明：透過內插法計算每日 (00:00-24:00) 的總用量。")
             df_24h = calculate_interpolated_usage(df, '1D')
-            draw_bar_chart(df_24h, "每日總用量 (24H)", "#EF553B") # 紅色系
+            draw_bar_chart(df_24h, "每日總用量 (24H)", "#EF553B")
 
         with tab3:
             draw_trend_chart(df)
 
         with tab4:
-            # 顯示原始表格供核對
             display_df = df[['Timestamp', 'Reading', 'Note']].sort_values('Timestamp', ascending=False)
             display_df['Timestamp'] = display_df['Timestamp'].dt.strftime("%Y-%m-%d %H:%M:%S")
             st.dataframe(display_df, use_container_width=True)
