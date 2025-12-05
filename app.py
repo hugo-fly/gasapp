@@ -29,7 +29,6 @@ def login_system():
         st.header("🔐 用戶登入")
         
         try:
-            # 讀取使用者清單 (加入 spreadsheet 參數避免 None 錯誤)
             users_df = conn.read(spreadsheet=SHEET_URL, worksheet="users", ttl=0)
             users_df.columns = users_df.columns.str.strip()
         except Exception as e:
@@ -45,11 +44,9 @@ def login_system():
                 clean_user = str(username_input).strip()
                 clean_pwd = str(password_input).strip()
 
-                # 尋找帳號
                 user_match = users_df[users_df['Username'].astype(str).str.strip() == clean_user]
                 
                 if not user_match.empty:
-                    # 比對密碼 (處理 .0)
                     stored_password = str(user_match.iloc[0]['Password']).strip().replace(".0", "")
                     
                     if clean_pwd == stored_password:
@@ -67,7 +64,7 @@ def login_system():
         return True
 
 # ==========================================
-# 3. 數據處理邏輯 (高級分析功能)
+# 3. 數據處理邏輯 (已修復 5 elements vs 3 elements 錯誤)
 # ==========================================
 def process_user_data(df, freq_hours):
     """處理數據並計算區間用量"""
@@ -96,6 +93,12 @@ def process_user_data(df, freq_hours):
     
     df_result['Usage'] = df_result['Reading'].diff()
     df_result = df_result.reset_index()
+
+    # ========================================================
+    # 🔴 核心修復點：只選取這 3 個欄位，避開多餘欄位導致的報錯
+    # ========================================================
+    df_result = df_result[['Timestamp', 'Reading', 'Usage']]
+
     df_result.columns = ['標準時間', '推估度數', '區間用量']
     
     labels = []
@@ -135,7 +138,6 @@ def main_app():
     user = st.session_state.username
     real_name = st.session_state.real_name
     
-    # 側邊欄
     with st.sidebar:
         st.write(f"👋 哈囉，**{real_name}**")
         if st.button("登出", type="secondary"):
@@ -172,7 +174,6 @@ def main_app():
                 st.success("✅ 紀錄已儲存！")
                 st.rerun()
 
-    # 主畫面
     st.title(f"🔥 {real_name} 的天然氣儀表板")
     
     try:
@@ -207,13 +208,17 @@ def main_app():
             tab1, tab2 = st.tabs(["12小時分析", "原始數據"])
             
             with tab1:
-                df_12h = process_user_data(df_user, 12)
-                if not df_12h.empty and len(df_12h) > 1:
-                    avg = df_12h['區間用量'].mean()
-                    fig = plot_chart(df_12h, avg, "12小時用量趨勢 (自動插值)")
-                    if fig: st.plotly_chart(fig, use_container_width=True)
+                # 只有當數據大於1筆時才做差值分析，避免報錯
+                if len(df_user) > 1:
+                    df_12h = process_user_data(df_user, 12)
+                    if not df_12h.empty and len(df_12h) > 1:
+                        avg = df_12h['區間用量'].mean()
+                        fig = plot_chart(df_12h, avg, "12小時用量趨勢 (自動插值)")
+                        if fig: st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("數據點不足或計算後無有效區間，請輸入更多不同時間點的紀錄。")
                 else:
-                    st.warning("數據點不足或計算後無有效區間，請輸入更多不同時間點的紀錄。")
+                    st.info("請至少輸入兩筆紀錄以產生趨勢分析圖。")
                     
             with tab2:
                 display_df = df_user[['Timestamp', 'Reading', 'Note']].copy()
