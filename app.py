@@ -5,7 +5,7 @@ from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 
 # ==========================================
-# 0. 設定區 (務必確認網址正確)
+# 0. 設定區
 # ==========================================
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1b55B_GkbT4vDwG2T5-wDQXs5RMlN8tkrBEVXvpzmrt4/edit?usp=sharing"
 
@@ -19,7 +19,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # 2. 登入系統邏輯
 # ==========================================
 def login_system():
-    """處理登入介面與驗證"""
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
         st.session_state.username = ""
@@ -27,7 +26,6 @@ def login_system():
 
     if not st.session_state.logged_in:
         st.header("🔐 用戶登入")
-        
         try:
             users_df = conn.read(spreadsheet=SHEET_URL, worksheet="users", ttl=0)
             users_df.columns = users_df.columns.str.strip()
@@ -43,12 +41,10 @@ def login_system():
             if submit:
                 clean_user = str(username_input).strip()
                 clean_pwd = str(password_input).strip()
-
                 user_match = users_df[users_df['Username'].astype(str).str.strip() == clean_user]
                 
                 if not user_match.empty:
                     stored_password = str(user_match.iloc[0]['Password']).strip().replace(".0", "")
-                    
                     if clean_pwd == stored_password:
                         st.session_state.logged_in = True
                         st.session_state.username = clean_user
@@ -64,7 +60,7 @@ def login_system():
         return True
 
 # ==========================================
-# 3. 數據處理邏輯 (已修復 5 elements vs 3 elements 錯誤)
+# 3. 數據處理邏輯 (已修復 Timestamp 報錯)
 # ==========================================
 def process_user_data(df, freq_hours):
     """處理數據並計算區間用量"""
@@ -92,11 +88,14 @@ def process_user_data(df, freq_hours):
     df_result = df_interpolated.loc[valid_targets].copy()
     
     df_result['Usage'] = df_result['Reading'].diff()
+    
+    # ========================================================
+    # 🔴 核心修復點：強制命名索引，防止 reset_index 後找不到欄位
+    # ========================================================
+    df_result.index.name = 'Timestamp' 
     df_result = df_result.reset_index()
-
-    # ========================================================
-    # 🔴 核心修復點：只選取這 3 個欄位，避開多餘欄位導致的報錯
-    # ========================================================
+    
+    # 現在這裡絕對安全了
     df_result = df_result[['Timestamp', 'Reading', 'Usage']]
 
     df_result.columns = ['標準時間', '推估度數', '區間用量']
@@ -114,7 +113,6 @@ def process_user_data(df, freq_hours):
     return df_result
 
 def plot_chart(df, avg_val, title):
-    """繪製圖表"""
     plot_df = df.iloc[1:].copy()
     if plot_df.empty: return None
 
@@ -151,7 +149,6 @@ def main_app():
             date_in = st.date_input("日期", datetime.now())
             time_in = st.time_input("時間", datetime.now())
             reading_in = st.number_input("瓦斯表度數", min_value=0.0, format="%.3f", step=0.1)
-            
             submit_data = st.form_submit_button("提交紀錄", type="primary")
             
             if submit_data:
@@ -170,14 +167,12 @@ def main_app():
                 
                 updated_df = pd.concat([all_data, new_row], ignore_index=True)
                 conn.update(spreadsheet=SHEET_URL, worksheet="logs", data=updated_df)
-                
                 st.success("✅ 紀錄已儲存！")
                 st.rerun()
 
     st.title(f"🔥 {real_name} 的天然氣儀表板")
     
     try:
-        # 讀取並修復日期格式
         df_all = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
         df_all['Timestamp'] = pd.to_datetime(df_all['Timestamp'], format='mixed', errors='coerce')
         df_all = df_all.dropna(subset=['Timestamp'])
@@ -208,7 +203,6 @@ def main_app():
             tab1, tab2 = st.tabs(["12小時分析", "原始數據"])
             
             with tab1:
-                # 只有當數據大於1筆時才做差值分析，避免報錯
                 if len(df_user) > 1:
                     df_12h = process_user_data(df_user, 12)
                     if not df_12h.empty and len(df_12h) > 1:
@@ -216,7 +210,7 @@ def main_app():
                         fig = plot_chart(df_12h, avg, "12小時用量趨勢 (自動插值)")
                         if fig: st.plotly_chart(fig, use_container_width=True)
                     else:
-                        st.warning("數據點不足或計算後無有效區間，請輸入更多不同時間點的紀錄。")
+                        st.warning("數據點不足或計算後無有效區間。")
                 else:
                     st.info("請至少輸入兩筆紀錄以產生趨勢分析圖。")
                     
