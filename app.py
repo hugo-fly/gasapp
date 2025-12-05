@@ -36,7 +36,6 @@ def login_system():
             pwd_in = st.text_input("密碼", type="password")
             if st.form_submit_button("登入"):
                 clean_user = str(user_in).strip()
-                # 轉字串比對，避免數字/文字格式不符
                 match = users_df[users_df['Username'].astype(str).str.strip() == clean_user]
                 
                 if not match.empty:
@@ -78,7 +77,6 @@ def calculate_interpolated_usage(df, interval_code):
     full_range = pd.date_range(start=start, end=end, freq='1h')
 
     # 3. 合併並進行內插
-    # 只取 'Reading' 欄位進行處理，避免其他文字欄位干擾
     df_resampled = df[['Reading']].reindex(full_range.union(df.index)).sort_index()
     df_resampled['Reading'] = pd.to_numeric(df_resampled['Reading'], errors='coerce')
     df_resampled['Reading'] = df_resampled['Reading'].interpolate(method='time')
@@ -92,10 +90,16 @@ def calculate_interpolated_usage(df, interval_code):
     # 清理數據
     df_final = df_final.dropna(subset=['Usage'])
     
-    # 6. 重置索引並改名
+    # ========================================================
+    # 🔴 核心修復點：強制命名索引，防止 KeyError
+    # ========================================================
+    df_final.index.name = 'Timestamp' 
+    # ========================================================
+    
+    # 6. 重置索引
     df_final = df_final.reset_index()
     
-    # 【關鍵修復點】：強制只選取這 3 欄，解決 ValueError
+    # 現在這裡絕對安全了，因為我們強制把索引命名為 Timestamp 了
     df_final = df_final[['Timestamp', 'Reading', 'Usage']]
     df_final.columns = ['時間點', '推估讀數', '區間用量']
     
@@ -203,7 +207,6 @@ def main_app():
 
     # 1. 讀取與清洗數據
     try:
-        # 【關鍵修復點】：加入 format='mixed' 解決日期格式錯誤
         df_all = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
         df_all['Timestamp'] = pd.to_datetime(df_all['Timestamp'], format='mixed', errors='coerce')
         df_all = df_all.dropna(subset=['Timestamp'])
@@ -260,3 +263,4 @@ def main_app():
 if __name__ == "__main__":
     if login_system():
         main_app()
+
