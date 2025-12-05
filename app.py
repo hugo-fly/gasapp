@@ -5,17 +5,18 @@ from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 
 # ==========================================
-# 0. 設定區
+# 1. 頁面設定與連接資料庫
 # ==========================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1b55B_GkbT4vDwG2T5-wDQXs5RMlN8tkrBEVXvpzmrt4/edit?usp=sharing"
-
 st.set_page_config(page_title="天然氣管家 (雲端版)", layout="wide")
+
+# 建立 Google Sheets 連線
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # ==========================================
-# 1. 登入系統
+# 2. 登入系統邏輯 (已整合防呆增強版)
 # ==========================================
 def login_system():
+    """處理登入介面與驗證"""
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
         st.session_state.username = ""
@@ -23,143 +24,229 @@ def login_system():
 
     if not st.session_state.logged_in:
         st.header("🔐 用戶登入")
+        
         try:
-            users_df = conn.read(spreadsheet=SHEET_URL, worksheet="users", ttl=0)
+            # 讀取使用者清單，並清理欄位名稱
+            users_df = conn.read(worksheet="users", ttl=0)
             users_df.columns = users_df.columns.str.strip()
         except Exception as e:
-            st.error(f"連線失敗: {e}")
+            st.error(f"無法讀取使用者資料庫: {e}")
             return False
 
         with st.form("login_form"):
-            user_input = st.text_input("帳號")
-            pwd_input = st.text_input("密碼", type="password")
-            if st.form_submit_button("登入"):
-                clean_user = str(user_input).strip()
-                clean_pwd = str(pwd_input).strip()
-                
-                # 尋找帳號
-                match = users_df[users_df['Username'].astype(str).str.strip() == clean_user]
+            username_input = st.text_input("帳號")
+            password_input = st.text_input("密碼", type="password")
+            submit = st.form_submit_button("登入")
 
-                if not match.empty:
-                    # 處理密碼 (去除 .0)
-                    db_pass = str(match.iloc[0]['Password']).strip().replace(".0", "")
-                    if db_pass == clean_pwd:
+            if submit:
+                # 清理輸入 (去空格 + 轉字串)
+                clean_user = str(username_input).strip()
+                clean_pwd = str(password_input).strip()
+
+                # 尋找帳號 (使用增強匹配邏輯)
+                user_match = users_df[users_df['Username'].astype(str).str.strip() == clean_user]
+                
+                if not user_match.empty:
+                    # 比對密碼 (處理 .0 問題)
+                    stored_password = str(user_match.iloc[0]['Password']).strip().replace(".0", "")
+                    
+                    if clean_pwd == stored_password:
                         st.session_state.logged_in = True
                         st.session_state.username = clean_user
-                        st.session_state.real_name = match.iloc[0]['Name']
-                        st.success("登入成功")
+                        st.session_state.real_name = user_match.iloc[0]['Name']
+                        st.success("登入成功！")
                         st.rerun()
                     else:
                         st.error("密碼錯誤")
                 else:
-                    st.error("找不到帳號")
-        return False
-    return True
+                    st.error("找不到此帳號")
+        return False # 未登入
+    else:
+        return True # 已登入
 
 # ==========================================
-# 2. 主程式 (含圖表與日期修復)
+# 3. 數據處理邏輯 (保留您原本的高級算法)
+# ==========================================
+def process_user_data(df, freq_hours):
+    """處理數據並計算區間用量"""
+    if df.empty: return pd.DataFrame()
+    
+    # 確保索引唯一且排序
+    df = df.sort_values('Timestamp')
+    df = df.drop_duplicates(subset=['Timestamp'], keep='last')
+    df = df.set_index('Timestamp')
+    
+    # 時間重採樣與插值
+    start_time = df.index[0]
+    end_time = df.index[-1]
+    
+    if start_time == end_time:
+        target_times = pd.Index([start_time])
+    else:
+        target_times = pd.date_range(start=start_time, end=end_time, freq=f'{freq_hours}h')
+    
+    all_times = df.index.union(target_times).sort_values()
+    # 處理重複索引問題 (防止插值報錯)
+    all_times = all_times.unique()
+    
+    df_interpolated = df.reindex(all_times)
+    # 確保 Reading 欄位是數值型態，避免插值錯誤
+    df_interpolated['Reading'] = pd.to_numeric(df_interpolated['Reading'], errors='coerce')
+    df_interpolated['Reading'] = df_interpolated['Reading'].interpolate(method='time')
+    
+    # 取回目標時間點
+    # intersection 用來確保 target_times 都在索引內
+    valid_targets = target_times.intersection(df_interpolated.index)
+    df_result = df_interpolated.loc[valid_targets].copy()
+    
+    df_result['Usage'] = df_result['Reading'].diff()
+    df_result = df_result.reset_index()
+    df_result.columns = ['標準時間', '推估度數', '區間用量']
+    
+    # 產生標籤
+    labels = []
+    for dt in df_result['標準時間']:
+        dt_start = dt - pd.Timedelta(hours=freq_hours)
+        period = "上午" if dt_start.hour < 12 else "下午"
+        if freq_hours == 12:
+            labels.append(f"{dt_start.strftime('%m/%d')} {period}")
+        else:
+            labels.append(f"{dt_start.strftime('%m/%d')}")
+    df_result['圖表標籤'] = labels
+    
+    return df_result
+
+def plot_chart(df, avg_val, title):
+    """繪製圖表"""
+    plot_df = df.iloc[1:].copy()
+    if plot_df.empty: return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=plot_df['圖表標籤'], y=plot_df['區間用量'],
+        name='區間用量', marker_color='#5B9BD5',
+        text=plot_df['區間用量'].round(2), textposition='auto'
+    ))
+    fig.add_trace(go.Scatter(
+        x=plot_df['圖表標籤'], y=[avg_val] * len(plot_df),
+        name='平均用量', line=dict(color='red', width=2, dash='dash')
+    ))
+    fig.update_layout(title=title, hovermode="x unified")
+    return fig
+
+# ==========================================
+# 4. 主程式 (Main App)
 # ==========================================
 def main_app():
     user = st.session_state.username
-    st.sidebar.write(f"👋 歡迎, {st.session_state.real_name}")
+    real_name = st.session_state.real_name
     
-    if st.sidebar.button("登出"):
-        st.session_state.logged_in = False
-        st.rerun()
-
-    # --- 新增紀錄區塊 ---
-    with st.sidebar.form("add_data"):
-        st.header("📝 新增紀錄")
-        date_in = st.date_input("日期", datetime.now())
-        time_in = st.time_input("時間", datetime.now())
-        val = st.number_input("度數", min_value=0.0, format="%.3f")
-        
-        if st.form_submit_button("提交"):
-            try:
-                logs_df = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
-            except:
-                logs_df = pd.DataFrame(columns=['Timestamp', 'Username', 'Reading', 'Note'])
-            
-            ts_str = datetime.combine(date_in, time_in).strftime("%Y-%m-%d %H:%M:%S")
-            
-            new_row = pd.DataFrame({
-                'Timestamp': [ts_str],
-                'Username': [user],
-                'Reading': [val],
-                'Note': ["App"]
-            })
-            
-            updated_df = pd.concat([logs_df, new_row], ignore_index=True)
-            conn.update(spreadsheet=SHEET_URL, worksheet="logs", data=updated_df)
-            st.success("成功儲存！")
+    # 側邊欄：登出與輸入
+    with st.sidebar:
+        st.write(f"👋 哈囉，**{real_name}**")
+        if st.button("登出", type="secondary"):
+            st.session_state.logged_in = False
             st.rerun()
+        
+        st.markdown("---")
+        st.header("📝 新增紀錄")
+        
+        with st.form("entry_form"):
+            date_in = st.date_input("日期", datetime.now())
+            time_in = st.time_input("時間", datetime.now())
+            reading_in = st.number_input("瓦斯表度數", min_value=0.0, format="%.3f", step=0.1)
+            
+            submit_data = st.form_submit_button("提交紀錄", type="primary")
+            
+            if submit_data:
+                # 1. 讀取目前所有數據
+                try:
+                    all_data = conn.read(worksheet="logs", ttl=0)
+                except:
+                    all_data = pd.DataFrame(columns=['Timestamp', 'Username', 'Reading', 'Note'])
 
-    # --- 儀表板區塊 ---
-    st.title("🔥 天然氣用量儀表板")
+                # 2. 準備新資料 (轉為標準字串格式以防寫入錯誤)
+                ts_str = datetime.combine(date_in, time_in).strftime("%Y-%m-%d %H:%M:%S")
+                new_row = pd.DataFrame({
+                    'Timestamp': [ts_str],
+                    'Username': [user],
+                    'Reading': [reading_in],
+                    'Note': ["App輸入"]
+                })
+                
+                # 3. 合併並寫回
+                updated_df = pd.concat([all_data, new_row], ignore_index=True)
+                conn.update(worksheet="logs", data=updated_df)
+                
+                st.success("✅ 紀錄已儲存！")
+                st.rerun()
+
+    # 主畫面邏輯
+    st.title(f"🔥 {real_name} 的天然氣儀表板")
     
+    # 1. 讀取並篩選該用戶數據
     try:
-        # 1. 讀取資料
-        df = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
+        df_all = conn.read(worksheet="logs", ttl=0)
         
-        # 2. 過濾該用戶資料
-        user_df = df[df['Username'].astype(str).str.strip() == str(user).strip()].copy()
+        # ========================================================
+        # 🔴 核心修復：使用混合模式讀取日期 (解決您的報錯)
+        # ========================================================
+        df_all['Timestamp'] = pd.to_datetime(df_all['Timestamp'], format='mixed', errors='coerce')
+        # 刪除日期解析失敗的行
+        df_all = df_all.dropna(subset=['Timestamp'])
         
-        if not user_df.empty:
-            # ========================================================
-            # 🔴 關鍵修復區：處理日期格式不一致的問題
-            # ========================================================
-            # format='mixed' 允許同時存在 "2025/11/29" 和 "2025-11-29 18:00"
-            # errors='coerce' 如果遇到無法解析的亂碼，會變成 NaT (空值) 而不是報錯
-            user_df['Timestamp'] = pd.to_datetime(user_df['Timestamp'], format='mixed', errors='coerce')
-            
-            # 刪除日期解析失敗的空行 (防止圖表報錯)
-            user_df = user_df.dropna(subset=['Timestamp'])
-            
-            # 排序
-            user_df = user_df.sort_values(by='Timestamp')
-            # ========================================================
-
-            # --- A. 顯示關鍵指標 (最新狀態) ---
-            if not user_df.empty:
-                last_record = user_df.iloc[-1]
-                col1, col2 = st.columns(2)
-                col1.metric("最新度數", f"{last_record['Reading']} 度")
-                col2.metric("上次抄表時間", last_record['Timestamp'].strftime("%Y-%m-%d"))
-
-                st.markdown("---")
-
-                # --- B. 繪製圖表 (Plotly) ---
-                st.subheader("📈 用量趨勢圖")
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=user_df['Timestamp'], 
-                    y=user_df['Reading'],
-                    mode='lines+markers',
-                    name='度數',
-                    line=dict(color='#FF4B4B', width=3)
-                ))
-                fig.update_layout(
-                    xaxis_title="日期",
-                    yaxis_title="度數",
-                    hovermode="x unified",
-                    template="plotly_dark"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-                # --- C. 顯示詳細資料表 ---
-                with st.expander("查看詳細數據表格"):
-                    display_df = user_df.sort_values(by='Timestamp', ascending=False)
-                    display_df['Timestamp'] = display_df['Timestamp'].dt.strftime("%Y-%m-%d %H:%M:%S")
-                    st.dataframe(display_df, use_container_width=True)
-            else:
-                st.warning("所有日期的格式都無法辨識，請檢查 Google Sheet 內容。")
-
-        else:
-            st.info("尚無抄表紀錄，請從左側新增第一筆資料。")
-            
+        # 篩選當前用戶
+        # 使用字串處理確保匹配成功 (防呆)
+        df_user = df_all[df_all['Username'].astype(str).str.strip() == str(user).strip()].copy()
+        df_user = df_user.sort_values('Timestamp')
+        
     except Exception as e:
-        st.error(f"讀取資料失敗: {e}")
+        st.error(f"讀取數據發生錯誤: {e}")
+        df_user = pd.DataFrame()
 
+    if df_user.empty:
+        st.info("目前還沒有您的紀錄，請從左側輸入第一筆數據。")
+    else:
+        # 顯示基本統計
+        try:
+            latest = df_user['Reading'].iloc[-1]
+            first_reading = df_user['Reading'].iloc[0]
+            total_used = latest - first_reading
+            days = (df_user['Timestamp'].iloc[-1] - df_user['Timestamp'].iloc[0]).days
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("目前讀數", f"{latest:.3f}")
+            c2.metric("累積用量", f"{total_used:.3f} 度")
+            c3.metric("監測天數", f"{days} 天")
+            
+            st.markdown("---")
+            
+            # 圖表分析
+            tab1, tab2 = st.tabs(["12小時分析", "原始數據"])
+            
+            with tab1:
+                # 呼叫您原本的高級處理函數
+                df_12h = process_user_data(df_user, 12)
+                if not df_12h.empty and len(df_12h) > 1:
+                    avg = df_12h['區間用量'].mean()
+                    fig = plot_chart(df_12h, avg, "12小時用量趨勢 (自動插值)")
+                    if fig: st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("數據點不足或計算後無有效區間，請輸入更多不同時間點的紀錄以進行插值分析。")
+                    
+            with tab2:
+                # 為了顯示美觀，將日期轉回字串
+                display_df = df_user[['Timestamp', 'Reading', 'Note']].copy()
+                display_df['Timestamp'] = display_df['Timestamp'].dt.strftime("%Y-%m-%d %H:%M:%S")
+                st.dataframe(display_df, use_container_width=True)
+                
+        except Exception as e:
+            st.error(f"計算統計數據時發生錯誤: {e}")
+            st.write("請檢查您的度數欄位是否包含非數字字符。")
+
+# ==========================================
+# 程式進入點
+# ==========================================
 if __name__ == "__main__":
     if login_system():
         main_app()
