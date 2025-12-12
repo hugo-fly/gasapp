@@ -54,7 +54,7 @@ def login_system():
     return True
 
 # ==========================================
-# 2. 核心數學邏輯：內插法補點 (已修復 KeyError)
+# 2. 核心數學邏輯：內插法補點
 # ==========================================
 def calculate_interpolated_usage(df, interval_code):
     """
@@ -86,12 +86,9 @@ def calculate_interpolated_usage(df, interval_code):
     df_final['Usage'] = df_final['Reading'].diff()
     df_final = df_final.dropna(subset=['Usage'])
     
-    # ========================================================
-    # 🔴 核心修復點 (暴力解法)：直接賦值給新欄位，防止索引遺失
-    # ========================================================
+    # 防止索引遺失
     df_final['Timestamp'] = df_final.index
     df_final = df_final.reset_index(drop=True)
-    # ========================================================
     
     # 6. 選取與改名
     df_final = df_final[['Timestamp', 'Reading', 'Usage']]
@@ -187,7 +184,7 @@ def main_app():
     try:
         df_all = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
         
-        # 🔴 關鍵修復：這裡加上了 format='mixed'，解決日期格式報錯
+        # 加上 format='mixed' 解決日期格式報錯
         df_all['Timestamp'] = pd.to_datetime(df_all['Timestamp'], format='mixed', errors='coerce')
         df_all = df_all.dropna(subset=['Timestamp'])
         
@@ -232,7 +229,7 @@ def main_app():
         with tab4:
             st.subheader("📋 原始數據管理")
             
-            # 準備下拉選單
+            # 準備下拉選單 (這裡的格式是 %Y-%m-%d %H:%M:%S)
             record_options = df.sort_values('Timestamp', ascending=False)['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()
             
             if not record_options:
@@ -240,11 +237,13 @@ def main_app():
             else:
                 col1, col2 = st.columns(2)
                 
-                # --- 修改功能 ---
+                # --- 修改功能 (已修復比對邏輯) ---
                 with col1:
                     with st.expander("✏️ 修改數據", expanded=True):
                         edit_target_str = st.selectbox("選擇紀錄", record_options, key="edit_sel")
-                        current_row = df[df['Timestamp'] == pd.to_datetime(edit_target_str)].iloc[0]
+                        
+                        # 從原始 df 抓目前的數值顯示在畫面上 (方便使用者看)
+                        current_row = df[df['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S') == edit_target_str].iloc[0]
                         
                         new_date = st.date_input("修正日期", current_row['Timestamp'])
                         new_time = st.time_input("修正時間", current_row['Timestamp'])
@@ -253,11 +252,13 @@ def main_app():
                         if st.button("確認修改", type="primary"):
                             try:
                                 fresh = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
-                                # 🔴 關鍵修復：這裡也必須加上 format='mixed'
                                 fresh['Timestamp'] = pd.to_datetime(fresh['Timestamp'], format='mixed', errors='coerce')
                                 
+                                # 🔴 關鍵修正：將 DB 裡的時間也轉成字串，才能跟選單的字串精確比對
+                                db_ts_str = fresh['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                                
                                 mask = (fresh['Username'].astype(str).str.strip() == str(user).strip()) & \
-                                       (fresh['Timestamp'].astype(str) == edit_target_str)
+                                       (db_ts_str == edit_target_str)
                                 
                                 if mask.any():
                                     new_ts = datetime.combine(new_date, new_time)
@@ -269,11 +270,11 @@ def main_app():
                                     st.success("修改成功！")
                                     st.rerun()
                                 else:
-                                    st.error("找不到原始資料，請重試。")
+                                    st.error(f"找不到原始資料。搜尋目標: {edit_target_str}")
                             except Exception as e:
                                 st.error(f"錯誤: {e}")
 
-                # --- 刪除功能 ---
+                # --- 刪除功能 (已修復比對邏輯) ---
                 with col2:
                     with st.expander("🗑️ 刪除數據", expanded=True):
                         del_target_str = st.selectbox("選擇紀錄", record_options, key="del_sel")
@@ -281,11 +282,13 @@ def main_app():
                         if st.button("確認刪除", type="primary"):
                             try:
                                 fresh = conn.read(spreadsheet=SHEET_URL, worksheet="logs", ttl=0)
-                                # 🔴 關鍵修復：這裡也加上 format='mixed'
                                 fresh['Timestamp'] = pd.to_datetime(fresh['Timestamp'], format='mixed', errors='coerce')
                                 
+                                # 🔴 關鍵修正：將 DB 裡的時間也轉成字串，才能跟選單的字串精確比對
+                                db_ts_str = fresh['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                                
                                 mask = (fresh['Username'].astype(str).str.strip() == str(user).strip()) & \
-                                       (fresh['Timestamp'].astype(str) == del_target_str)
+                                       (db_ts_str == del_target_str)
                                 
                                 if mask.any():
                                     fresh = fresh[~mask]
@@ -293,7 +296,7 @@ def main_app():
                                     st.success("刪除成功！")
                                     st.rerun()
                                 else:
-                                    st.error("找不到原始資料。")
+                                    st.error(f"找不到原始資料。搜尋目標: {del_target_str}")
                             except Exception as e:
                                 st.error(f"錯誤: {e}")
             
@@ -305,6 +308,3 @@ def main_app():
 if __name__ == "__main__":
     if login_system():
         main_app()
-
-
-
