@@ -296,4 +296,21 @@ def main_app():
                                 db_ts_str = fresh['Timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
                                 mask = (fresh['Username'].astype(str).str.strip() == str(user).strip()) & (db_ts_str == del_target_str)
                                 
-                                if mask.any
+                                if mask.any():
+                                    fresh = fresh[~mask]
+                                    conn.update(spreadsheet=SHEET_URL, worksheet="logs", data=fresh)
+                                    st.success("刪除成功！")
+                                    st.rerun()
+                                else:
+                                    st.error(f"找不到原始資料。")
+                            except Exception as e:
+                                st.error(f"錯誤: {e}")
+            
+            st.divider()
+            display_df = df[['Timestamp', 'Reading', 'Note']].sort_values('Timestamp', ascending=False)
+            display_df['Timestamp'] = display_df['Timestamp'].dt.strftime("%Y-%m-%d %H:%M:%S")
+            st.dataframe(display_df, use_container_width=True)
+
+if __name__ == "__main__":
+    if login_system():
+        main_app()
